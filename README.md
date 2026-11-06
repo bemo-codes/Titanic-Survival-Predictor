@@ -202,21 +202,6 @@ http://localhost:8501
 
 ---
 
-## ☁️ Deploy on Streamlit Community Cloud
-
-1. Push this project to a GitHub repository.
-2. Open [Streamlit Community Cloud](https://share.streamlit.io/).
-3. Sign in using GitHub.
-4. Select **Create app**.
-5. Choose the repository containing this project.
-6. Select the deployment branch, normally `main`.
-7. Set the main file path to `app.py`.
-8. Select **Deploy**.
-
-Keep `app.py`, `TitanicDataset.csv`, and `requirements.txt` in the repository root so the deployed app can locate the entrypoint, data, and dependencies.
-
----
-
 ## 🧪 Example Prediction Inputs
 
 Try a few different combinations to see how the model responds:
