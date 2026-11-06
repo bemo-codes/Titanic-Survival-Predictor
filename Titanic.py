@@ -15,7 +15,13 @@ import pandas as pd
 import seaborn as sns
 import streamlit as st
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    classification_report,
+    confusion_matrix,
+)
 from sklearn.model_selection import train_test_split
 
 
@@ -236,19 +242,22 @@ def prepare_features(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, dict]
 
 #############################################################################
 #
-#   Function name:      train_model
-#   Input:              path (string)
-#   Description:        Preprocesses the Titanic data, splits it into training and test sets, trains Logistic Regression, and calculates evaluation metrics.
-#   Output:             Dictionary containing the trained model and evaluation results
+#   Function name:      train_models
+#   Input:              path (string), tree_max_depth (integer)
+#   Description:        Preprocesses the Titanic data, creates one shared train-test split,
+#                       trains Logistic Regression and Decision Tree classifiers, and
+#                       calculates evaluation metrics for both models.
+#   Output:             Dictionary containing both trained models and evaluation results
 #   Date:               06/11/2026
 #   Author:             Shivam Ramesh Kurlekar
 #
 #############################################################################
 @st.cache_resource
-def train_model(path: str) -> dict:
+def train_models(path: str, tree_max_depth: int = 3) -> dict:
     raw_data = pd.read_csv(path)
     X, y, imputation = prepare_features(raw_data)
 
+    # Both algorithms use the exact same split for a fair comparison.
     X_train, X_test, y_train, y_test = train_test_split(
         X,
         y,
@@ -256,31 +265,50 @@ def train_model(path: str) -> dict:
         random_state=42,
     )
 
-    model = LogisticRegression(max_iter=1000)
-    model.fit(X_train, y_train)
+    model_definitions = {
+        "Logistic Regression": LogisticRegression(max_iter=1000),
+        "Decision Tree": DecisionTreeClassifier(
+            max_depth=tree_max_depth,
+            random_state=42,
+        ),
+    }
 
-    predictions = model.predict(X_test)
-    probabilities = model.predict_proba(X_test)[:, 1]
+    model_results = {}
+    for model_name, model in model_definitions.items():
+        model.fit(X_train, y_train)
+        predictions = model.predict(X_test)
+
+        model_results[model_name] = {
+            "model": model,
+            "predictions": predictions,
+            "probabilities": model.predict_proba(X_test)[:, 1],
+            "accuracy": accuracy_score(y_test, predictions),
+            "balanced_accuracy": balanced_accuracy_score(y_test, predictions),
+            "confusion_matrix": confusion_matrix(
+                y_test,
+                predictions,
+                labels=[0, 1],
+            ),
+            "report": classification_report(
+                y_test,
+                predictions,
+                labels=[0, 1],
+                target_names=["Did not survive", "Survived"],
+                output_dict=True,
+                zero_division=0,
+            ),
+        }
 
     return {
-        "model": model,
+        "models": model_results,
         "feature_columns": X.columns.tolist(),
         "imputation": imputation,
         "X_test": X_test,
         "y_test": y_test,
-        "predictions": predictions,
-        "probabilities": probabilities,
-        "accuracy": accuracy_score(y_test, predictions),
-        "confusion_matrix": confusion_matrix(y_test, predictions, labels=[0, 1]),
-        "report": classification_report(
-            y_test,
-            predictions,
-            labels=[0, 1],
-            target_names=["Did not survive", "Survived"],
-            output_dict=True,
-            zero_division=0,
-        ),
         "class_counts": y.value_counts().sort_index().to_dict(),
+        "tree_max_depth": tree_max_depth,
+        "training_records": len(X_train),
+        "test_records": len(X_test),
     }
 
 
@@ -334,7 +362,8 @@ def prepare_passenger_input(
 #
 #   Function name:      model_download_bytes
 #   Input:              bundle (dict)
-#   Description:        Serializes the trained model and its preprocessing metadata into downloadable Joblib bytes.
+#   Description:        Serializes both trained classifiers and their shared preprocessing
+#                       metadata into a downloadable Joblib model bundle.
 #   Output:             bytes
 #   Date:               06/11/2026
 #   Author:             Shivam Ramesh Kurlekar
@@ -344,12 +373,16 @@ def model_download_bytes(bundle: dict) -> bytes:
     buffer = io.BytesIO()
     joblib.dump(
         {
-            "model": bundle["model"],
+            "models": {
+                model_name: result["model"]
+                for model_name, result in bundle["models"].items()
+            },
             "feature_columns": bundle["feature_columns"],
             "imputation": bundle["imputation"],
             "target_mapping": {0: "Did not survive", 1: "Survived"},
             "sex_encoding": {"Male": 0, "Female": 1},
             "embarked_codes": [0, 1, 2],
+            "decision_tree_max_depth": bundle["tree_max_depth"],
         },
         buffer,
     )
@@ -414,7 +447,10 @@ def survival_count_chart(data: pd.DataFrame) -> plt.Figure:
 #   Author:             Shivam Ramesh Kurlekar
 #
 #############################################################################
-def confusion_matrix_chart(matrix: np.ndarray) -> plt.Figure:
+def confusion_matrix_chart(
+    matrix: np.ndarray,
+    title: str = "Confusion Matrix",
+) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(6, 4.5))
     fig.patch.set_facecolor("#111b2b")
     ax.set_facecolor("#111b2b")
@@ -430,7 +466,7 @@ def confusion_matrix_chart(matrix: np.ndarray) -> plt.Figure:
         yticklabels=["Did not survive", "Survived"],
         ax=ax,
     )
-    ax.set_title("Confusion Matrix", color="#f8fafc", weight="bold", pad=14)
+    ax.set_title(title, color="#f8fafc", weight="bold", pad=14)
     ax.set_xlabel("Predicted label", color="#cbd5e1")
     ax.set_ylabel("Actual label", color="#cbd5e1")
     ax.tick_params(colors="#cbd5e1", rotation=0)
@@ -487,7 +523,9 @@ def survival_by_group_chart(data: pd.DataFrame, group_column: str, title: str) -
 #
 #   Function name:      main
 #   Input:              None
-#   Description:        Runs the Streamlit dashboard, loads the dataset, displays analytics and model metrics, and handles passenger predictions.
+#   Description:        Runs the Streamlit dashboard, loads passenger data, trains and
+#                       compares Logistic Regression and Decision Tree models, and
+#                       provides interactive passenger survival predictions.
 #   Output:             None
 #   Date:               06/11/2026
 #   Author:             Shivam Ramesh Kurlekar
@@ -499,12 +537,13 @@ def main() -> None:
     st.markdown(
         """
         <div class="hero">
-            <div class="hero-kicker">Machine Learning • Logistic Regression</div>
+            <div class="hero-kicker">Machine Learning • Logistic Regression + Decision Tree</div>
             <h1 class="hero-title">🚢 Titanic Survival Predictor</h1>
             <p class="hero-copy">
-                Explore passenger data, inspect a Logistic Regression model,
-                and test how passenger details influence its estimated survival
-                prediction. A historic dataset, brought into an interactive ML dashboard.
+                Explore passenger data, compare two classification algorithms,
+                inspect model performance, and test how passenger details influence
+                estimated survival predictions. Two models, one historic dataset,
+                and a dashboard built to make the comparison easy to understand.
             </p>
         </div>
         """,
@@ -517,11 +556,28 @@ def main() -> None:
         )
         st.stop()
 
+    if not hasattr(st, "session_state"):
+        st.error("Streamlit session state is unavailable. Update Streamlit and try again.")
+        st.stop()
+
+    # Model configuration is visible in the sidebar.
+    with st.sidebar:
+        st.markdown("## ⚙️ Model Configuration")
+        tree_max_depth = st.slider(
+            "Decision Tree maximum depth",
+            min_value=1,
+            max_value=15,
+            value=3,
+            step=1,
+            help="Controls the maximum depth of the Decision Tree. Logistic Regression is unchanged.",
+        )
+        st.caption("Both models use the same 80/20 train-test split and random state 42.")
+
     try:
         data = load_dataset(str(DATA_PATH))
-        bundle = train_model(str(DATA_PATH))
+        bundle = train_models(str(DATA_PATH), tree_max_depth)
     except Exception as exc:
-        st.error(f"Could not load the dataset or train the model: {exc}")
+        st.error(f"Could not load the dataset or train the models: {exc}")
         st.stop()
 
     required_display_columns = {"Survived", "Age", "Fare", "Sex", "Pclass"}
@@ -529,15 +585,20 @@ def main() -> None:
         st.error("The dataset does not contain all columns required by this dashboard.")
         st.stop()
 
+    models = bundle["models"]
+    logistic_results = models["Logistic Regression"]
+    tree_results = models["Decision Tree"]
+
     survival_rate = float(data["Survived"].mean() * 100)
     survived_count = int((data["Survived"] == 1).sum())
     not_survived_count = int((data["Survived"] == 0).sum())
 
     with st.sidebar:
-        st.markdown("## ⚙️ Model Snapshot")
-        st.metric("Test accuracy", f"{bundle['accuracy'] * 100:.1f}%")
-        st.metric("Training records", f"{len(data) - len(bundle['y_test']):,}")
-        st.metric("Test records", f"{len(bundle['y_test']):,}")
+        st.divider()
+        st.markdown("### 📊 Model Snapshot")
+        st.metric("Logistic Regression accuracy", f"{logistic_results['accuracy'] * 100:.1f}%")
+        st.metric("Decision Tree accuracy", f"{tree_results['accuracy'] * 100:.1f}%")
+        st.caption(f"Decision Tree depth: {tree_max_depth}")
         st.divider()
         st.markdown("### 🧾 Dataset notes")
         st.caption("Target: `Survived`")
@@ -546,8 +607,7 @@ def main() -> None:
         st.caption("Sex encoding: 0 = Male, 1 = Female")
         st.caption("Embarked is stored as numeric codes (0, 1, 2).")
         st.divider()
-        st.caption("Model: Logistic Regression")
-        st.caption("Test split: 80% train / 20% test")
+        st.caption("Train-test split: 80% / 20%")
         st.caption("Random state: 42")
 
     metric_columns = st.columns(4)
@@ -560,7 +620,7 @@ def main() -> None:
         [
             "🧭 Voyage Overview",
             "🔎 Passenger Explorer",
-            "📈 Model Performance",
+            "📈 Model Comparison",
             "🔮 Survival Predictor",
         ]
     )
@@ -571,7 +631,7 @@ def main() -> None:
     with tab_overview:
         st.subheader("The passenger manifest")
         st.markdown(
-            '<p class="section-note">A quick look at the data behind the model.</p>',
+            '<p class="section-note">A quick look at the data behind both models.</p>',
             unsafe_allow_html=True,
         )
 
@@ -604,9 +664,9 @@ def main() -> None:
             st.dataframe(missing_table, use_container_width=True)
 
         st.info(
-            "The model drops passenger identifiers and the constant `zero` column. "
-            "Missing Age and Fare values are filled with their medians, missing "
-            "Embarked values with the mode, and Embarked is one-hot encoded."
+            "Both models use the same preprocessed features and the same train-test split. "
+            "Passenger identifiers and the constant `zero` column are excluded. "
+            "Age and Fare are median-imputed; Embarked is mode-imputed and one-hot encoded."
         )
 
     # -----------------------------------------------------------------
@@ -671,64 +731,91 @@ def main() -> None:
         )
 
     # -----------------------------------------------------------------
-    # Tab 3: Model performance
+    # Tab 3: Model comparison
     # -----------------------------------------------------------------
     with tab_model:
-        st.subheader("How did the model perform?")
+        st.subheader("Two algorithms. One dataset. Which performs better?")
         st.markdown(
-            '<p class="section-note">The model is evaluated on a held-out test set '
-            'that was not used during training.</p>',
+            '<p class="section-note">Both classifiers are evaluated on exactly the same held-out '
+            'test records. Compare more than accuracy, especially because the target classes are imbalanced.</p>',
             unsafe_allow_html=True,
         )
 
-        score_col, test_col, method_col = st.columns(3)
-        score_col.metric("Accuracy", f"{bundle['accuracy'] * 100:.2f}%")
-        test_col.metric("Test samples", f"{len(bundle['y_test']):,}")
-        method_col.metric("Algorithm", "Logistic Regression")
-
-        matrix_col, report_col = st.columns([1, 1.15])
-        with matrix_col:
-            st.markdown("#### Confusion matrix")
-            st.pyplot(
-                confusion_matrix_chart(bundle["confusion_matrix"]),
-                use_container_width=True,
-            )
-            st.caption(
-                "Rows represent actual labels; columns represent model predictions."
-            )
-
-        with report_col:
-            st.markdown("#### Classification report")
-            report_rows = {
-                key: value
-                for key, value in bundle["report"].items()
-                if isinstance(value, dict)
-            }
-            report_df = pd.DataFrame(report_rows).T
-            report_df = report_df.rename(
-                index={
-                    "0": "Did not survive",
-                    "1": "Survived",
-                    "accuracy": "Accuracy",
-                    "macro avg": "Macro average",
-                    "weighted avg": "Weighted average",
+        comparison_rows = []
+        for model_name, result in models.items():
+            survivor_metrics = result["report"]["Survived"]
+            comparison_rows.append(
+                {
+                    "Model": model_name,
+                    "Accuracy": result["accuracy"],
+                    "Balanced accuracy": result["balanced_accuracy"],
+                    "Survivor precision": survivor_metrics["precision"],
+                    "Survivor recall": survivor_metrics["recall"],
+                    "Survivor F1-score": survivor_metrics["f1-score"],
                 }
             )
-            st.dataframe(
-                report_df.round(3),
-                use_container_width=True,
-            )
+        comparison_df = pd.DataFrame(comparison_rows).set_index("Model")
 
-        st.markdown("#### Download the trained model")
+        st.markdown("#### Performance comparison")
+        st.dataframe(
+            comparison_df.style.format("{:.1%}"),
+            use_container_width=True,
+        )
         st.caption(
-            "The download includes the fitted classifier and the feature-column "
+            "Balanced accuracy is the average recall across the two classes. "
+            "Survivor precision, recall and F1-score focus specifically on passengers labelled as survived."
+        )
+
+        lr_col, dt_col = st.columns(2)
+        for column, model_name, result in [
+            (lr_col, "Logistic Regression", logistic_results),
+            (dt_col, "Decision Tree", tree_results),
+        ]:
+            with column:
+                st.markdown(f"### {model_name}")
+                st.metric("Accuracy", f"{result['accuracy'] * 100:.2f}%")
+                st.metric("Balanced accuracy", f"{result['balanced_accuracy'] * 100:.2f}%")
+                st.markdown("#### Confusion matrix")
+                st.pyplot(
+                    confusion_matrix_chart(
+                        result["confusion_matrix"],
+                        title=f"{model_name} Confusion Matrix",
+                    ),
+                    use_container_width=True,
+                )
+                st.markdown("#### Classification report")
+                report_rows = {
+                    key: value
+                    for key, value in result["report"].items()
+                    if isinstance(value, dict)
+                }
+                report_df = pd.DataFrame(report_rows).T
+                report_df = report_df.rename(
+                    index={
+                        "0": "Did not survive",
+                        "1": "Survived",
+                        "macro avg": "Macro average",
+                        "weighted avg": "Weighted average",
+                    }
+                )
+                st.dataframe(report_df.round(3), use_container_width=True)
+
+        st.markdown("#### Download both trained models")
+        st.caption(
+            "The bundle includes both fitted classifiers and the shared feature-column "
             "and imputation metadata needed to prepare prediction inputs."
         )
         st.download_button(
             label="⬇️ Download model bundle (.joblib)",
             data=model_download_bytes(bundle),
-            file_name="TitanicSurvivalModel.joblib",
+            file_name="TitanicSurvivalModels.joblib",
             mime="application/octet-stream",
+        )
+
+        st.info(
+            f"Decision Tree maximum depth is currently set to {tree_max_depth}. "
+            "Changing this setting retrains the tree. It does not change Logistic Regression. "
+            "A higher accuracy on one split does not automatically mean a model generalizes better."
         )
 
     # -----------------------------------------------------------------
@@ -737,12 +824,17 @@ def main() -> None:
     with tab_predict:
         st.subheader("Put a passenger's details to the test")
         st.markdown(
-            '<p class="section-note">Enter passenger information and let the model '
-            'estimate the probability of survival.</p>',
+            '<p class="section-note">Choose a classifier, enter passenger information, '
+            "and view the model's estimated survival probability.</p>",
             unsafe_allow_html=True,
         )
 
         with st.form("passenger_prediction_form"):
+            selected_model_name = st.selectbox(
+                "Choose prediction model",
+                options=["Logistic Regression", "Decision Tree"],
+                help="Choose which trained classifier should generate the prediction.",
+            )
             col_a, col_b = st.columns(2)
 
             with col_a:
@@ -819,16 +911,17 @@ def main() -> None:
                     bundle["feature_columns"],
                     bundle["imputation"],
                 )
-                prediction = int(bundle["model"].predict(prediction_frame)[0])
+                selected_model = models[selected_model_name]["model"]
+                prediction = int(selected_model.predict(prediction_frame)[0])
                 survival_probability = float(
-                    bundle["model"].predict_proba(prediction_frame)[0][1]
+                    selected_model.predict_proba(prediction_frame)[0][1]
                 )
 
                 st.divider()
                 result_left, result_right = st.columns([1, 1])
 
                 with result_left:
-                    st.markdown("#### Model prediction")
+                    st.markdown(f"#### {selected_model_name} prediction")
                     if prediction == 1:
                         st.success("The model predicts: **Survived**")
                     else:
@@ -848,6 +941,7 @@ def main() -> None:
                     details = pd.DataFrame(
                         {
                             "Input": [
+                                "Prediction model",
                                 "Passenger class",
                                 "Age",
                                 "Sex",
@@ -857,6 +951,7 @@ def main() -> None:
                                 "Embarked code",
                             ],
                             "Value": [
+                                selected_model_name,
                                 passenger_class,
                                 age,
                                 sex_label,
@@ -870,9 +965,9 @@ def main() -> None:
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
                 st.caption(
-                    "This is a prediction from a Logistic Regression model trained "
-                    "on the supplied historical dataset. It is an educational "
-                    "demonstration, not a statement about an individual's actual fate."
+                    f"This is a prediction from the {selected_model_name} classifier trained "
+                    "on the supplied historical dataset. It is an educational demonstration, "
+                    "not a statement about an individual's actual fate."
                 )
             except Exception as exc:
                 st.error(f"Prediction could not be generated: {exc}")
